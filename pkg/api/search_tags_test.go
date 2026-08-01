@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
@@ -131,7 +132,7 @@ func TestSearchTagValuesBlockRequestRoundTripPreservesLimits(t *testing.T) {
 		FooterSize:    456,
 	}
 
-	httpReq, err := BuildSearchTagValuesBlockRequest(httptest.NewRequest("GET", "http://tempo/", nil), original)
+	httpReq, err := BuildSearchTagValuesBlockRequest(httptest.NewRequest("GET", "http://tempo/", nil), original, "")
 	require.NoError(t, err)
 	httpReq = mux.SetURLVars(httpReq, map[string]string{MuxVarTagName: original.SearchReq.TagName})
 
@@ -140,6 +141,71 @@ func TestSearchTagValuesBlockRequestRoundTripPreservesLimits(t *testing.T) {
 
 	require.Equal(t, original.SearchReq.MaxTagValues, parsed.SearchReq.MaxTagValues)
 	require.Equal(t, original.SearchReq.StaleValueThreshold, parsed.SearchReq.StaleValueThreshold)
+}
+
+func TestSearchTagBlockRequestsRoundTripDedicatedColumns(t *testing.T) {
+	const dedicatedColumnsJSON = `[{"name":"http.method"}]`
+
+	tests := []struct {
+		name       string
+		build      func(*http.Request, string) (*http.Request, error)
+		parse      func(*http.Request) ([]*tempopb.DedicatedColumn, error)
+		setURLVars func(*http.Request) *http.Request
+	}{
+		{
+			name: "tags",
+			build: func(req *http.Request, dedicatedColumnsJSON string) (*http.Request, error) {
+				return BuildSearchTagsBlockRequest(req, &tempopb.SearchTagsBlockRequest{
+					SearchReq: &tempopb.SearchTagsRequest{Start: 100, End: 200, Scope: "span"},
+					BlockID:   uuid.New().String(), StartPage: 0, PagesToSearch: 1,
+					IndexPageSize: 1, TotalRecords: 1, Version: "vParquet4", Size_: 1,
+				}, dedicatedColumnsJSON)
+			},
+			parse: func(req *http.Request) ([]*tempopb.DedicatedColumn, error) {
+				parsed, err := ParseSearchTagsBlockRequest(req)
+				if err != nil {
+					return nil, err
+				}
+				return parsed.DedicatedColumns, nil
+			},
+		},
+		{
+			name: "tag values",
+			build: func(req *http.Request, dedicatedColumnsJSON string) (*http.Request, error) {
+				return BuildSearchTagValuesBlockRequest(req, &tempopb.SearchTagValuesBlockRequest{
+					SearchReq: &tempopb.SearchTagValuesRequest{TagName: "span.http.method", Start: 100, End: 200},
+					BlockID:   uuid.New().String(), StartPage: 0, PagesToSearch: 1,
+					IndexPageSize: 1, TotalRecords: 1, Version: "vParquet4", Size_: 1,
+				}, dedicatedColumnsJSON)
+			},
+			parse: func(req *http.Request) ([]*tempopb.DedicatedColumn, error) {
+				parsed, err := ParseSearchTagValuesBlockRequest(req)
+				if err != nil {
+					return nil, err
+				}
+				return parsed.DedicatedColumns, nil
+			},
+			setURLVars: func(req *http.Request) *http.Request {
+				return mux.SetURLVars(req, map[string]string{MuxVarTagName: "span.http.method"})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := tc.build(httptest.NewRequest("GET", "http://tempo/", nil), dedicatedColumnsJSON)
+			require.NoError(t, err)
+			require.Equal(t, dedicatedColumnsJSON, req.URL.Query().Get(urlParamDedicatedColumns))
+			if tc.setURLVars != nil {
+				req = tc.setURLVars(req)
+			}
+
+			columns, err := tc.parse(req)
+			require.NoError(t, err)
+			require.Len(t, columns, 1)
+			require.Equal(t, "http.method", columns[0].Name)
+		})
+	}
 }
 
 // TestParseSearchTags tests the SearchTagValues function

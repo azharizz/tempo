@@ -1,0 +1,6 @@
+change_type: bug_fix
+component: query-frontend
+note: Preserve dedicated-column metadata when the query frontend fans out tag and tag-value searches to backend blocks.
+issues: []
+subtext: This keeps dynamic dedicated attributes available to the querier for vParquet block scans instead of silently omitting them from tag-search requests.
+user: azharizz

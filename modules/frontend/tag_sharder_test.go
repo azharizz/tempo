@@ -23,6 +23,7 @@ import (
 	"github.com/grafana/tempo/modules/frontend/combiner"
 	"github.com/grafana/tempo/modules/frontend/pipeline"
 	"github.com/grafana/tempo/modules/overrides"
+	"github.com/grafana/tempo/pkg/api"
 	"github.com/grafana/tempo/pkg/tempopb"
 	"github.com/grafana/tempo/tempodb/backend"
 )
@@ -86,7 +87,7 @@ func (r *fakeReq) buildSearchTagRequest(subR *http.Request) (*http.Request, erro
 }
 
 func (r *fakeReq) buildTagSearchBlockRequest(subR *http.Request, blockID string,
-	startPage int, pages int, _ *backend.BlockMeta,
+	startPage int, pages int, _ *backend.BlockMeta, _ string,
 ) (*http.Request, error) {
 	newReq := subR.Clone(subR.Context())
 	q := subR.URL.Query()
@@ -103,6 +104,35 @@ func (r *fakeReq) buildTagSearchBlockRequest(subR *http.Request, blockID string,
 	newReq.URL.RawQuery = q.Encode()
 
 	return newReq, nil
+}
+
+func TestTagBackendRequestsIncludeDedicatedColumns(t *testing.T) {
+	bm := backend.NewBlockMetaWithDedicatedColumns("test", uuid.New(), "vParquet4", backend.DedicatedColumns{
+		{Scope: backend.DedicatedColumnScopeSpan, Name: "http.method", Type: backend.DedicatedColumnTypeString},
+	})
+	bm.StartTime = time.Unix(100, 0)
+	bm.EndTime = time.Unix(200, 0)
+	bm.Size_ = defaultTargetBytesPerRequest
+	bm.TotalRecords = 1
+
+	parent := pipeline.NewHTTPRequest(httptest.NewRequest("GET", "/?start=100&end=200", nil))
+	searchReq := &tagsSearchRequest{request: tempopb.SearchTagsRequest{Start: 100, End: 200, Scope: "span"}}
+	reqCh := make(chan pipeline.Request, 1)
+
+	s := searchTagSharder{}
+	s.buildBackendRequests(context.Background(), "test", parent, []*backend.BlockMeta{bm}, defaultTargetBytesPerRequest, reqCh, func(err error) {
+		require.NoError(t, err)
+	}, searchReq)
+
+	requests := make([]pipeline.Request, 0, 1)
+	for req := range reqCh {
+		requests = append(requests, req)
+	}
+	require.Len(t, requests, 1)
+
+	columnsJSON, err := api.NewDedicatedColumnsToJSON().JSONForDedicatedColumns(bm.DedicatedColumns)
+	require.NoError(t, err)
+	require.Equal(t, columnsJSON, requests[0].HTTPRequest().URL.Query().Get("dc"))
 }
 
 func TestTagsBackendRequestsDoNotHitBackendIfStartIsAfterQueryBackendAfter(t *testing.T) {
